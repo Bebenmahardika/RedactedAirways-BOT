@@ -17,6 +17,8 @@ const API_CONSTANTS = {
     TELEGRAM_AUTH: "/task/telegram-auth",
     REVALIDATE: "/revalidate",
     AUTH: "/auth",
+    PARTNER_ACTIVITY: "/partnerActivity",
+    PARTNERS: "/partners",
   },
 };
 
@@ -184,6 +186,31 @@ const handleTaskExecution = async (apiClient, task) => {
   }
 };
 
+const handlePartnerTask = async (apiClient, partnerId, taskType) => {
+  try {
+    const response = await apiClient.post(
+      API_CONSTANTS.ENDPOINTS.PARTNER_ACTIVITY,
+      {
+        partnerId: partnerId,
+        taskType: taskType,
+      }
+    );
+
+    if (response.data.status === 200) {
+      logger.success(
+        `${colors.success}Partner task ${taskType} recorded successfully${colors.reset}`
+      );
+      return true;
+    }
+    return false;
+  } catch (error) {
+    logger.error(
+      `${colors.error}Error executing partner task: ${error.message}${colors.reset}`
+    );
+    return false;
+  }
+};
+
 const getUserInfo = async (apiClient) => {
   try {
     const response = await apiClient.get(API_CONSTANTS.ENDPOINTS.USER_INFO);
@@ -208,6 +235,33 @@ const getTaskList = async (apiClient) => {
   }
 };
 
+const getPartnerTasks = async (apiClient) => {
+  try {
+    const response = await apiClient.get(API_CONSTANTS.ENDPOINTS.PARTNERS);
+    if (response.data.status === 200) {
+      const partnerTasks = response.data.data.reduce((tasks, partner) => {
+        const partnerTasksWithInfo = partner.tasks.map((task) => ({
+          ...task,
+          partnerId: partner._id,
+          partnerName: partner.partner_name,
+        }));
+        return [...tasks, ...partnerTasksWithInfo];
+      }, []);
+
+      logger.success(
+        `${colors.success}Successfully fetched ${partnerTasks.length} partner tasks${colors.reset}`
+      );
+      return partnerTasks;
+    }
+    return [];
+  } catch (error) {
+    logger.error(
+      `${colors.error}Error getting partner tasks: ${error.message}${colors.reset}`
+    );
+    return [];
+  }
+};
+
 const findNextUnlockTime = (tasks) => {
   const now = new Date();
   let nextUnlockTime = null;
@@ -226,45 +280,57 @@ const findNextUnlockTime = (tasks) => {
   return nextUnlockTime;
 };
 
-const processTasks = async (apiClient, tasks) => {
+const processTasks = async (apiClient, regularTasks, partnerTasks = []) => {
   while (true) {
-    const filteredTasks = tasks.filter(
+    const filteredTasks = regularTasks.filter(
       (task) => task.task_action !== TASK_ACTIONS.TELEGRAM_AUTH
     );
 
-    const totalTasks = filteredTasks.length;
-    const completedTasks = filteredTasks.filter(
-      (task) => task.completed
+    const allTasks = [...filteredTasks, ...partnerTasks];
+    const totalTasks = allTasks.length;
+    const completedTasks = allTasks.filter(
+      (task) => task.completed || task.status === "completed"
     ).length;
 
     logger.info(
-      `${colors.info}Task Progress: ${completedTasks}/${totalTasks} completed (excluding Telegram auth)${colors.reset}`
+      `${colors.info}Task Progress: ${completedTasks}/${totalTasks} completed${colors.reset}`
     );
 
     let hasExecutedTask = false;
     const now = new Date();
 
-    for (const task of filteredTasks) {
-      if (task.completed) continue;
+    for (const task of allTasks) {
+      if (task.completed || task.status === "completed") continue;
 
       if (task.timer && new Date(task.timer) > now) {
         logger.warn(
           `${colors.warning}Task ${
-            task.task_name
+            task.task_name || task.text
           } is time-locked until ${formatDateTime(task.timer)}${colors.reset}`
         );
         continue;
       }
 
-      logger.info(
-        `${colors.info}Processing task: ${task.task_name} (${task.task_points} points)${colors.reset}`
-      );
-      await handleTaskExecution(apiClient, task);
+      const taskName = task.task_name || task.text;
+      const taskPoints = task.task_points || task.points;
+
+      if (task.partnerId) {
+        logger.info(
+          `${colors.info}Processing partner task for ${task.partnerName}: ${taskName} (${taskPoints} points)${colors.reset}`
+        );
+        await handlePartnerTask(apiClient, task.partnerId, task.task_type);
+      } else {
+        logger.info(
+          `${colors.info}Processing task: ${taskName} (${taskPoints} points)${colors.reset}`
+        );
+        await handleTaskExecution(apiClient, task);
+      }
+
       hasExecutedTask = true;
       await delay(2000);
     }
 
-    const nextUnlockTime = findNextUnlockTime(filteredTasks);
+    const nextUnlockTime = findNextUnlockTime(allTasks);
 
     if (!hasExecutedTask && nextUnlockTime) {
       const waitTime = nextUnlockTime - now;
@@ -293,18 +359,26 @@ const processTasks = async (apiClient, tasks) => {
     }
 
     try {
-      const refreshedTasks = await getTaskList(apiClient);
-      if (refreshedTasks.length > 0) {
-        tasks = refreshedTasks;
+      const [refreshedRegularTasks, refreshedPartnerTasks] = await Promise.all([
+        getTaskList(apiClient),
+        getPartnerTasks(apiClient),
+      ]);
+
+      if (
+        refreshedRegularTasks.length > 0 ||
+        refreshedPartnerTasks.length > 0
+      ) {
+        regularTasks = refreshedRegularTasks;
+        partnerTasks = refreshedPartnerTasks;
       } else {
         logger.warn(
-          `${colors.warning}Failed to refresh task list, retrying in 30 seconds...${colors.reset}`
+          `${colors.warning}Failed to refresh tasks, retrying in 30 seconds...${colors.reset}`
         );
         await delay(30000);
       }
     } catch (error) {
       logger.error(
-        `${colors.error}Error refreshing task list: ${error.message}, retrying in 30 seconds...${colors.reset}`
+        `${colors.error}Error refreshing tasks: ${error.message}, retrying in 30 seconds...${colors.reset}`
       );
       await delay(30000);
     }
@@ -352,15 +426,17 @@ const runAutomation = async () => {
 
       displayUserInfo(userInfo);
 
-      const tasks = await getTaskList(apiClient);
-      if (tasks.length === 0) {
-        logger.error(
-          `${colors.error}No tasks found or error getting tasks${colors.reset}`
-        );
+      const [regularTasks, partnerTasks] = await Promise.all([
+        getTaskList(apiClient),
+        getPartnerTasks(apiClient),
+      ]);
+
+      if (regularTasks.length === 0 && partnerTasks.length === 0) {
+        logger.error(`${colors.error}No tasks found${colors.reset}`);
         continue;
       }
 
-      await processTasks(apiClient, tasks);
+      await processTasks(apiClient, regularTasks, partnerTasks);
       logger.success(
         `${colors.success}Account processing completed${colors.reset}`
       );
