@@ -1,6 +1,6 @@
 # RedactedAirways BOT
 
-An automation bot for [RedactedAirways Quest](https://quest.redactedairways.com/?r=ZQ40DL) built with Node.js.
+An automation bot for [RedactedAirways Quest](https://quest.redactedairways.com/?r=QBD1JI) built with Node.js.
 
 ## Features
 
@@ -90,7 +90,7 @@ node main.js
 
 ## Register
 
-Join [RedactedAirways](https://quest.redactedairways.com/?r=ZQ40DL)
+Join [RedactedAirways](https://quest.redactedairways.com/?r=QBD1JI)
 
 ## Contact
 
